@@ -1,0 +1,18 @@
+[project]
+name = "taiwan-baseball-tracker"
+version = "0.1.0"
+description = "Discord 私訊臺灣旅外球員即時成績追蹤"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.10,<4",
+  "beautifulsoup4>=4.12,<5",
+  "discord.py>=2.5,<3",
+  "python-dotenv>=1.0,<2",
+  "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+logs/
+*.egg-info/
+score.html
+text.html
+test*.txt
+stats.txt
