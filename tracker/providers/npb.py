@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import re
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 import aiohttp
@@ -79,17 +80,20 @@ class NpbProvider(DataProvider):
                     inning_str = INNINGS_MAP.get(raw_inning, raw_inning)
                     
                     for item in inning_section.select("li.bb-liveText__item"):
-                        player_link = item.select_one("a.bb-liveText__player")
-                        if not player_link:
+                        # 必須只鎖定打者欄位的連結，排除更換投手等摘要連結
+                        batter_link = item.select_one("p.bb-liveText__batter a.bb-liveText__player")
+                        if not batter_link:
                             continue
-                        match = re.search(r"/npb/player/(\d+)/", player_link.get("href", ""))
+                        match = re.search(r"/npb/player/(\d+)/", batter_link.get("href", ""))
                         if not match:
                             continue
                         batter_id = match.group(1)
                         if batter_id in tracked:
-                            summaries = item.select("p.bb-liveText__summary span.bb-liveText__state")
+                            summaries = item.select("p.bb-liveText__summary:not(.bb-liveText__summary--change) span.bb-liveText__state")
                             if summaries:
                                 raw_outcome = summaries[-1].get_text(" ", strip=True)
+                                if not raw_outcome or raw_outcome in {"→", "->", "－"}:
+                                    continue
                                 outcome = raw_outcome
                                 for jp_text, tw_text in REPLACE_MAP:
                                     outcome = outcome.replace(jp_text, tw_text)
@@ -112,9 +116,9 @@ class NpbProvider(DataProvider):
                     rows = table.find_all("tr")
                     if not rows: continue
                     headers = [th.get_text(" ", strip=True) for th in rows[0].find_all(["th", "td"])]
-                    if "投球回" in headers and "投手" in headers:
+                    if "投球回" in headers and "選手名" in headers:
                         for row in rows[1:]:
-                            player_link = row.select_one("a")
+                            player_link = row.select_one('a[href*="/npb/player/"]')
                             if not player_link: continue
                             match = re.search(r"/npb/player/(\d+)/", player_link.get("href", ""))
                             if not match: continue
@@ -123,64 +127,144 @@ class NpbProvider(DataProvider):
                                 cols = [td.get_text(" ", strip=True) for td in row.find_all(["th", "td"])]
                                 stats_dict = dict(zip(headers, cols))
                                 ip_str = stats_dict.get("投球回", "0")
-                                if ip_str != "0" and ip_str != "-":
-                                    outs = 0
-                                    if "1/3" in ip_str:
-                                        outs = int(ip_str.split()[0]) * 3 + 1 if ip_str.split()[0].isdigit() else 1
-                                    elif "2/3" in ip_str:
-                                        outs = int(ip_str.split()[0]) * 3 + 2 if ip_str.split()[0].isdigit() else 2
-                                    else:
-                                        try:
-                                            outs = int(ip_str) * 3
-                                        except ValueError:
-                                            pass
-                                    
-                                    if outs > 0:
-                                        body = (f"目前局內/累計成績：{ip_str} 局、{stats_dict.get('被安打', '0')} 安打、"
-                                                f"{stats_dict.get('失点', '0')} 失分、{stats_dict.get('与四死球', '0')} 保送、"
-                                                f"{stats_dict.get('奪三振', '0')} 三振、{stats_dict.get('投球数', '0')} 球")
-                                        key = f"NPB:{game_id}:IP:{pitcher_id}:{outs}"
-                                        events.append(TrackingEvent(
-                                            key=key,
-                                            league=League.NPB,
-                                            game_id=game_id,
-                                            player_id=pitcher_id,
-                                            kind=EventKind.PITCHING_INNING,
-                                            occurred_at=datetime.now(UTC),
-                                            title="投球成績更新",
-                                            body=body,
-                                            game_date=date.today().isoformat()
-                                        ))
+                                outs = _parse_npb_ip_outs(ip_str)
+                                pitches = stats_dict.get("投球数", "0")
+                                
+                                if outs > 0 or (pitches.isdigit() and int(pitches) > 0):
+                                    walks = _parse_npb_walks(stats_dict)
+                                    er = stats_dict.get("自責点")
+                                    er_str = f"（{er} 責失）" if er is not None and er != "-" else ""
+                                    body = (f"目前局內/累計成績：{ip_str} 局、{stats_dict.get('被安打', '0')} 安打、"
+                                            f"{stats_dict.get('失点', '0')} 失分{er_str}、{walks} 保送、"
+                                            f"{stats_dict.get('奪三振', '0')} 三振、{pitches} 球")
+                                    key = f"NPB:{game_id}:IP:{pitcher_id}:{outs}:{pitches}"
+                                    events.append(TrackingEvent(
+                                        key=key,
+                                        league=League.NPB,
+                                        game_id=game_id,
+                                        player_id=pitcher_id,
+                                        kind=EventKind.PITCHING_INNING,
+                                        occurred_at=datetime.now(UTC),
+                                        title="投球成績更新",
+                                        body=body,
+                                        game_date=date.today().isoformat()
+                                    ))
 
             # 3. GAME_FINAL
             if final:
                 for player_id in tracked:
-                    played = False
+                    final_sections: list[str] = []
                     if not isinstance(stats_html, Exception):
-                        for link in stats_html.select(f'a[href*="/npb/player/{player_id}/"]'):
-                            played = True
-                            break
-                    if played:
-                        key = f"NPB:{game_id}:FINAL:{player_id}"
-                        events.append(TrackingEvent(
-                            key=key,
-                            league=League.NPB,
-                            game_id=game_id,
-                            player_id=player_id,
-                            kind=EventKind.GAME_FINAL,
-                            occurred_at=datetime.now(UTC),
-                            title="終場成績",
-                            body="比賽結束，本日成績請參考球季累計與各打席。",
-                            game_date=date.today().isoformat()
-                        ))
+                        # 擷取打擊成績
+                        for table in stats_html.select("table.bb-statsTable"):
+                            rows = table.find_all("tr")
+                            if not rows: continue
+                            headers = [th.get_text(" ", strip=True) for th in rows[0].find_all(["th", "td"])]
+                            if "選手名" in headers and "打数" in headers:
+                                for row in rows[1:]:
+                                    link = row.select_one('a[href*="/npb/player/"]')
+                                    if not link: continue
+                                    m = re.search(r"/npb/player/(\d+)/", link.get("href", ""))
+                                    if not m or m.group(1) != player_id: continue
+                                    cols = [td.get_text(" ", strip=True) for td in row.find_all(["th", "td"])]
+                                    sd = dict(zip(headers, cols))
+                                    ab = sd.get("打数", "0")
+                                    h = sd.get("安打", "0")
+                                    r = sd.get("得点", "0")
+                                    rbi = sd.get("打点", "0")
+                                    so = sd.get("三振", "0")
+                                    bb = int(sd.get("四球", 0) or 0) + int(sd.get("死球", 0) or 0) if ("四球" in sd or "死球" in sd) else sd.get("四死球", "0")
+                                    hr = sd.get("本塁打", "0")
+                                    sb = sd.get("盗塁", "0")
+                                    final_sections.append(
+                                        f"打者：{ab} 打數、{h} 安打、{hr} 全壘打、{r} 得分、{rbi} 打點、{bb} 保送、{so} 三振、{sb} 盜壘"
+                                    )
+                        # 擷取投球成績
+                        for table in stats_html.select("table.bb-scoreTable"):
+                            rows = table.find_all("tr")
+                            if not rows: continue
+                            headers = [th.get_text(" ", strip=True) for th in rows[0].find_all(["th", "td"])]
+                            if "選手名" in headers and "投球回" in headers:
+                                for row in rows[1:]:
+                                    link = row.select_one('a[href*="/npb/player/"]')
+                                    if not link: continue
+                                    m = re.search(r"/npb/player/(\d+)/", link.get("href", ""))
+                                    if not m or m.group(1) != player_id: continue
+                                    cols = [td.get_text(" ", strip=True) for td in row.find_all(["th", "td"])]
+                                    sd = dict(zip(headers, cols))
+                                    ip = sd.get("投球回", "0")
+                                    h = sd.get("被安打", "0")
+                                    r = sd.get("失点", "0")
+                                    er = sd.get("自責点", r)
+                                    walks = _parse_npb_walks(sd)
+                                    so = sd.get("奪三振", "0")
+                                    np = sd.get("投球数", "0")
+                                    final_sections.append(
+                                        f"投手：{ip} 局、{h} 被安打、{r} 失分、{er} 自責分、{walks} 保送、{so} 三振、{np} 球"
+                                    )
+
+                    if final_sections:
+                        body_content = "\n".join(final_sections)
+                    else:
+                        # 檢查是否有出賽連結
+                        played = False
+                        if not isinstance(stats_html, Exception):
+                            for link in stats_html.select(f'a[href*="/npb/player/{player_id}/"]'):
+                                played = True
+                                break
+                        if not played:
+                            continue
+                        body_content = "比賽結束，本日出賽細節請參考打席與投球紀錄。"
+
+                    key = f"NPB:{game_id}:FINAL:{player_id}"
+                    events.append(TrackingEvent(
+                        key=key,
+                        league=League.NPB,
+                        game_id=game_id,
+                        player_id=player_id,
+                        kind=EventKind.GAME_FINAL,
+                        occurred_at=datetime.now(UTC),
+                        title="終場成績",
+                        body=body_content,
+                        game_date=date.today().isoformat()
+                    ))
                         
+        final_player_ids = {
+            event.player_id for event in events if event.kind == EventKind.GAME_FINAL
+        }
+        if final_player_ids:
+            stats_results = await asyncio.gather(
+                *(self._season_stats(player_id) for player_id in final_player_ids),
+                return_exceptions=True,
+            )
+            season_by_player = {
+                player_id: stats
+                for player_id, stats in zip(final_player_ids, stats_results, strict=True)
+                if isinstance(stats, str)
+            }
+            events = [
+                replace(
+                    event,
+                    body=f"{event.body}\n\n**球季累計**\n{season_by_player[event.player_id]}",
+                )
+                if event.kind == EventKind.GAME_FINAL
+                and event.player_id in season_by_player
+                else event
+                for event in events
+            ]
+
         return events
 
     async def daily_summary(self, player: Player, start: date, end: date) -> str:
         events = await self.collect_events([player.external_id], start, end)
         finals = [event.body for event in events if event.kind == EventKind.GAME_FINAL]
-        games = "\n".join(finals) if finals else "本日沒有可用的出賽紀錄。"
-        return f"{games}\n\n**球季累計**\n{await self._season_stats(player.external_id)}"
+        season = await self._season_stats(player.external_id)
+        if finals:
+            games = "\n\n".join(finals)
+        else:
+            games = "這段期間沒有可用的出賽紀錄。"
+        cleaned_games = games.replace(f"\n\n**球季累計**\n{season}", "")
+        return f"{cleaned_games}\n\n**球季累計**\n{season}"
 
     async def _season_stats(self, player_id: str) -> str:
         soup = await self._html(f"/npb/player/{player_id}/top")
@@ -218,3 +302,37 @@ class NpbProvider(DataProvider):
                         f"{stats.get('投球回', '-')} 局｜{decisions}｜{relief}｜"
                         f"ERA {stats.get('防御率', '-')}｜WHIP {stats.get('WHIP', '-')}")
         return "資料來源未提供"
+
+
+def _parse_npb_ip_outs(ip_str: str) -> int:
+    ip_str = ip_str.strip()
+    if not ip_str or ip_str in {"-", "0"}:
+        return 0
+    if "1/3" in ip_str:
+        parts = ip_str.split()
+        return int(parts[0]) * 3 + 1 if len(parts) > 1 and parts[0].isdigit() else 1
+    if "2/3" in ip_str:
+        parts = ip_str.split()
+        return int(parts[0]) * 3 + 2 if len(parts) > 1 and parts[0].isdigit() else 2
+    if "." in ip_str:
+        try:
+            full, frac = ip_str.split(".", 1)
+            full_inn = int(full) if full else 0
+            frac_out = int(frac[0]) if frac else 0
+            return full_inn * 3 + min(frac_out, 2)
+        except ValueError:
+            return 0
+    try:
+        return int(ip_str) * 3
+    except ValueError:
+        return 0
+
+
+def _parse_npb_walks(sd: dict[str, str]) -> int:
+    if "与四球" in sd or "与死球" in sd:
+        bb = int(sd.get("与四球", 0) or 0) if str(sd.get("与四球", "")).isdigit() else 0
+        hbp = int(sd.get("与死球", 0) or 0) if str(sd.get("与死球", "")).isdigit() else 0
+        return bb + hbp
+    val = sd.get("与四死球", "0")
+    return int(val) if str(val).isdigit() else 0
+

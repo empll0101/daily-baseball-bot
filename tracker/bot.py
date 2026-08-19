@@ -162,7 +162,7 @@ class TrackerClient(discord.Client):
             await interaction.response.send_message(
                 "✅ Bot 運作中\n"
                 "• MLB：公開 Stats API（已接通）\n"
-                "• NPB：Yahoo! JAPAN 賽況頁爬蟲（測試版）\n"
-                "• KBO：MyKBOStats 賽況頁爬蟲（測試版）",
+                "• NPB：Yahoo! JAPAN 賽況（已接通）\n"
+                "• KBO：Naver Sports / KBO 官方網站（已接通）",
                 ephemeral=True,
             )

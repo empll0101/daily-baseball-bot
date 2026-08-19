@@ -5,13 +5,16 @@ import logging
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
 from ..models import EventKind, League, Player, TrackingEvent
 from .base import DataProvider, ProviderUnavailable
+
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 class MlbProvider(DataProvider):
@@ -262,8 +265,14 @@ class MlbProvider(DataProvider):
         return result
 
     async def daily_summary(self, player: Player, start: date, end: date) -> str:
-        events = await self.collect_events([player.external_id], start, end)
-        finals = [event for event in events if event.kind == EventKind.GAME_FINAL]
+        # 涵蓋前一日美東晚場賽事（臺灣時間上午開打）
+        query_start = start - timedelta(days=1)
+        events = await self.collect_events([player.external_id], query_start, end)
+        finals = [
+            event for event in events
+            if event.kind == EventKind.GAME_FINAL
+            and (start <= event.occurred_at.astimezone(TAIPEI).date() <= end or start.isoformat() <= event.game_date <= end.isoformat())
+        ]
         season = await self._season_stats(player.external_id, end.year)
         if finals:
             games = "\n\n".join(f"**{event.game_date}**\n{event.body}" for event in finals)
