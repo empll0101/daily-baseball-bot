@@ -273,9 +273,9 @@ class NpbProvider(DataProvider):
                                 order_num = int(om.group(1))
                                 batting_order_slots[half][order_num] = batter_id
 
-                        # 次打者提前預告 (ON_DECK)
+                        # 次打者提前預告 (NPB 提前至前兩棒打者，以彌補爬蟲延遲)
                         if order_num:
-                            next_slot = (order_num % 9) + 1
+                            next_slot = ((order_num + 1) % 9) + 1
                             next_batter_id = batting_order_slots[half].get(next_slot)
                             if next_batter_id and next_batter_id in tracked:
                                 state_tag = item.select_one("p.bb-liveText__batter span.bb-liveText__state")
@@ -296,7 +296,7 @@ class NpbProvider(DataProvider):
                                     kind=EventKind.ON_DECK,
                                     occurred_at=next_event_time(),
                                     title=f"{inning_str}｜即將上場打擊",
-                                    body=f"目前 {outs} 出局，下一棒即將輪到打擊！",
+                                    body=f"目前 {outs} 出局，預計兩棒後輪到打擊！",
                                     game_date=game_date_str,
                                 ))
 

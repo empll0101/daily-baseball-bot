@@ -1088,7 +1088,7 @@ async def test_npb_on_deck_event_generation():
 
     schedule_html = '<a href="/npb/game/2026091501/index">Game</a>'
 
-    # 1局上：1番打者一打擊時（0出局），次打者為2番林安可
+    # 1局上：1番打者一打擊時（0出局），提前兩棒預告3番林安可
     text_html = """
     <html><head><title>2026年9月15日 比賽</title></head><body>
     <section class="bb-liveText">
@@ -1106,10 +1106,19 @@ async def test_npb_on_deck_event_generation():
         <p class="bb-liveText__number">2：</p>
         <p class="bb-liveText__batter">
           <span class="bb-liveText__order">2番</span>
-          <a class="bb-liveText__player" href="/npb/player/1660299/top">林安可</a>
+          <a class="bb-liveText__player" href="/npb/player/1002/top">打者二</a>
           <span class="bb-liveText__state">無死一塁</span>
         </p>
-        <p class="bb-liveText__summary"><span class="bb-liveText__state">ライトスタンドへの2ランホームラン！</span></p>
+        <p class="bb-liveText__summary"><span class="bb-liveText__state">レフトへのヒット 一二塁</span></p>
+      </li>
+      <li class="bb-liveText__item">
+        <p class="bb-liveText__number">3：</p>
+        <p class="bb-liveText__batter">
+          <span class="bb-liveText__order">3番</span>
+          <a class="bb-liveText__player" href="/npb/player/1660299/top">林安可</a>
+          <span class="bb-liveText__state">無死一二塁</span>
+        </p>
+        <p class="bb-liveText__summary"><span class="bb-liveText__state">ライトスタンドへの3ランホームラン！</span></p>
       </li>
       <footer class="bb-liveText__footer">
         <table class="bb-liveTextTable"><tr><td class="bb-liveTextTable__data">-</td></tr></table>
@@ -1123,6 +1132,7 @@ async def test_npb_on_deck_event_generation():
       <table class="bb-scoreTable">
         <tr><th>選手名</th><th>打数</th></tr>
         <tr><td><a href="/npb/player/1001/top">打者一</a></td><td>1</td></tr>
+        <tr><td><a href="/npb/player/1002/top">打者二</a></td><td>1</td></tr>
         <tr><td><a href="/npb/player/1660299/top">林安可</a></td><td>1</td></tr>
       </table>
       <table class="bb-scoreTable">
@@ -1151,7 +1161,7 @@ async def test_npb_on_deck_event_generation():
         assert on_deck.player_id == "1660299"
         assert on_deck.title == "一局上｜即將上場打擊"
         assert "0 出局" in on_deck.body
-        assert "下一棒即將輪到打擊" in on_deck.body
+        assert "預計兩棒後輪到打擊" in on_deck.body
 
         pa = events[1]
         assert pa.kind == EventKind.PLATE_APPEARANCE
