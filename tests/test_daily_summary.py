@@ -47,3 +47,64 @@ async def _async_test_mlb_daily_summary():
     assert "這段期間沒有可用的出賽紀錄" not in summary
     assert "打者：1 打數、1 安打、1 得分" in summary
     assert "打者：出賽 75" in summary
+
+
+def test_npb_daily_summary_final_and_in_progress():
+    asyncio.run(_async_test_npb_daily_summary())
+
+
+async def _async_test_npb_daily_summary():
+    from tracker.providers.npb import NpbProvider
+
+    provider = NpbProvider(session=None)  # type: ignore
+
+    # 1. 測試當天比賽已結束 (GAME_FINAL)
+    final_event = TrackingEvent(
+        key="NPB:test:FINAL:2106890",
+        league=League.NPB,
+        game_id="test",
+        player_id="2106890",
+        kind=EventKind.GAME_FINAL,
+        occurred_at=datetime.now(UTC),
+        title="終場成績",
+        body="打者：4 打數、2 安打、1 全壘打、1 得分、3 打點、0 保送、1 三振、0 盜壘",
+        game_date="2026-08-26",
+    )
+
+    async def mock_collect_final(pids, s, e):
+        return [final_event]
+
+    async def mock_season(pid):
+        return "打者：出賽 50｜打席 180｜AVG .285｜OBP .350｜SLG .450｜OPS .800"
+
+    provider.collect_events = mock_collect_final  # type: ignore
+    provider._season_stats = mock_season  # type: ignore
+
+    player = Player(League.NPB, "2106890", "孫易磊")
+    summary = await provider.daily_summary(player, date(2026, 8, 26), date(2026, 8, 26))
+    assert "4 打數、2 安打、1 全壘打" in summary
+    assert "球季累計" in summary
+    assert "AVG .285" in summary
+
+    # 2. 測試比賽進行中 (僅有打席事件，尚未結算 GAME_FINAL)
+    pa_event = TrackingEvent(
+        key="NPB:test:PA:1回表:2106890:123",
+        league=League.NPB,
+        game_id="test",
+        player_id="2106890",
+        kind=EventKind.PLATE_APPEARANCE,
+        occurred_at=datetime.now(UTC),
+        title="一局上｜面對 山本 由伸",
+        body="左外野方向安打",
+        game_date="2026-08-26",
+    )
+
+    async def mock_collect_live(pids, s, e):
+        return [pa_event]
+
+    provider.collect_events = mock_collect_live  # type: ignore
+    live_summary = await provider.daily_summary(player, date(2026, 8, 26), date(2026, 8, 26))
+    assert "本日出賽紀錄" in live_summary
+    assert "一局上｜面對 山本 由伸：左外野方向安打" in live_summary
+    assert "球季累計" in live_summary
+

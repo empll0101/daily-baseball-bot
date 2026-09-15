@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 
 
 class League(StrEnum):
@@ -13,10 +12,11 @@ class League(StrEnum):
 
 
 class EventKind(StrEnum):
+    ON_DECK = "on_deck"
     PLATE_APPEARANCE = "plate_appearance"
     PITCHING_INNING = "pitching_inning"
+    PITCHING_EXIT = "pitching_exit"
     GAME_FINAL = "game_final"
-    DEGRADED = "degraded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,5 +47,4 @@ class TrackingEvent:
     title: str
     body: str
     game_date: str
-    payload: dict[str, Any] = field(default_factory=dict)
 

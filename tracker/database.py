@@ -43,9 +43,6 @@ CREATE TABLE IF NOT EXISTS metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_subscriptions_player
-  ON subscriptions (league, player_id);
-CREATE INDEX IF NOT EXISTS idx_events_date ON events (game_date);
 """
 
 

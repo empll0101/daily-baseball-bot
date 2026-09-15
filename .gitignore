@@ -12,3 +12,8 @@ score.html
 text.html
 test*.txt
 stats.txt
+baseball.db
+data/
+scratch/
+*.pdf
+guide.html

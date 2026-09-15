@@ -134,17 +134,58 @@ class MlbProvider(DataProvider):
         default_time = _parse_time(game_data.get("datetime", {}).get("dateTime"))
         result: list[TrackingEvent] = []
 
+        boxscore = live.get("boxscore", {})
+        batting_order_slots = {"top": {}, "bottom": {}}
+        for side_name, half_key in [("away", "top"), ("home", "bottom")]:
+            team_data = boxscore.get("teams", {}).get(side_name, {})
+            for pkey, pdata in team_data.get("players", {}).items():
+                bo_str = pdata.get("battingOrder")
+                if bo_str and bo_str.isdigit():
+                    slot = int(bo_str) // 100
+                    if 1 <= slot <= 9:
+                        batting_order_slots[half_key][slot] = str(pdata.get("person", {}).get("id", ""))
+
         for play in plays:
             matchup = play.get("matchup", {})
             batter_id = str(matchup.get("batter", {}).get("id", ""))
             pitcher_id = str(matchup.get("pitcher", {}).get("id", ""))
+            pitcher_name = matchup.get("pitcher", {}).get("fullName", "")
             about = play.get("about", {})
+            half_inning = about.get("halfInning", "")
+            index = about.get("atBatIndex", play.get("atBatIndex", 0))
+            inning = about.get("inning", "?")
+            half = "上" if half_inning == "top" else "下"
+
+            # 次打者提前預告 (ON_DECK)
+            slots = batting_order_slots.get(half_inning, {})
+            current_slot = None
+            for slot_num, pid in slots.items():
+                if pid == batter_id:
+                    current_slot = slot_num
+                    break
+
+            if current_slot is not None:
+                next_slot = (current_slot % 9) + 1
+                next_batter_id = slots.get(next_slot)
+                if next_batter_id and next_batter_id in tracked:
+                    outs = int(about.get("startOuts", 0) or 0)
+                    result.append(
+                        TrackingEvent(
+                            key=f"MLB:{game_id}:ON_DECK:{index}:{next_batter_id}",
+                            league=League.MLB,
+                            game_id=game_id,
+                            player_id=next_batter_id,
+                            kind=EventKind.ON_DECK,
+                            occurred_at=_play_time(play, default_time) - timedelta(seconds=1),
+                            title=f"第 {inning} 局{half}｜即將上場打擊",
+                            body=f"目前 {outs} 出局，下一棒即將輪到打擊！",
+                            game_date=game_date,
+                        )
+                    )
+
             play_result = play.get("result", {})
             ended = bool(about.get("isComplete", play_result.get("event")))
             if batter_id in tracked and ended:
-                index = about.get("atBatIndex", play.get("atBatIndex", 0))
-                inning = about.get("inning", "?")
-                half = "上" if about.get("halfInning") == "top" else "下"
                 event_name = play_result.get("event", "打席結束")
                 description = play_result.get("description", "資料來源未提供敘述")
                 hit_info = []
@@ -160,6 +201,16 @@ class MlbProvider(DataProvider):
                         break
                 if hit_info:
                     description += f"\n📊 {' / '.join(hit_info)}"
+
+                if pitcher_name:
+                    pa_title = (
+                        f"第 {inning} 局{half}｜面對 {pitcher_name}｜{event_name}"
+                        if event_name and event_name != "打席結束"
+                        else f"第 {inning} 局{half}｜面對 {pitcher_name}"
+                    )
+                else:
+                    pa_title = f"第 {inning} 局{half}｜{event_name}"
+
                 result.append(
                     TrackingEvent(
                         key=f"MLB:{game_id}:PA:{index}:{batter_id}",
@@ -168,20 +219,27 @@ class MlbProvider(DataProvider):
                         player_id=batter_id,
                         kind=EventKind.PLATE_APPEARANCE,
                         occurred_at=_play_time(play, default_time),
-                        title=f"第 {inning} 局{half}｜{event_name}",
+                        title=pa_title,
                         body=description,
                         game_date=game_date,
                     )
                 )
 
         pitching_groups: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
+        pitcher_innings: dict[str, list[tuple[int, str]]] = defaultdict(list)
+        last_pitcher_in_half: dict[tuple[int, str], str] = {}
+
         for play in plays:
             matchup = play.get("matchup", {})
             pitcher_id = str(matchup.get("pitcher", {}).get("id", ""))
             about = play.get("about", {})
             inning = int(about.get("inning", 0) or 0)
             half = about.get("halfInning", "")
-            if pitcher_id in tracked and inning and _half_inning_complete(feed, inning, half, pitcher_id):
+            if pitcher_id and inning and half:
+                last_pitcher_in_half[(inning, half)] = pitcher_id
+                if (inning, half) not in pitcher_innings[pitcher_id]:
+                    pitcher_innings[pitcher_id].append((inning, half))
+            if pitcher_id in tracked and inning and _half_inning_complete(feed, inning, half):
                 pitching_groups[(pitcher_id, inning, half)].append(play)
 
         for (pitcher_id, inning, half), inning_plays in pitching_groups.items():
@@ -217,6 +275,63 @@ class MlbProvider(DataProvider):
                     game_date=game_date,
                 )
             )
+
+        # 投手退場通知（PITCHING_EXIT）
+        teams = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+        linescore = feed.get("liveData", {}).get("linescore", {})
+        current_pitcher_id = str(linescore.get("defense", {}).get("pitcher", {}).get("id", ""))
+        is_final = (game_data.get("status", {}).get("abstractGameState") == "Final")
+
+        for side in ["away", "home"]:
+            team_box = teams.get(side, {})
+            team_pitchers = [str(pid) for pid in team_box.get("pitchers", [])]
+            for pid in tracked:
+                if pid in team_pitchers and pid in pitcher_innings:
+                    idx = team_pitchers.index(pid)
+                    has_subsequent = (idx < len(team_pitchers) - 1)
+                    is_replaced = has_subsequent or (current_pitcher_id and current_pitcher_id != pid) or is_final
+
+                    if is_replaced:
+                        last_inn, last_half = pitcher_innings[pid][-1]
+                        completed = (last_pitcher_in_half.get((last_inn, last_half)) == pid)
+                        inn_finished = _half_inning_complete(feed, last_inn, last_half)
+
+                        # 狀況一：完整局數吃完後退場（該半局結束）
+                        # 狀況二：非完整局數退場（局中被換），等待該半局結束後通知
+                        should_emit_exit = (completed and inn_finished) or (not completed and inn_finished)
+
+                        if should_emit_exit:
+                            p_stats = (
+                                team_box.get("players", {})
+                                .get(f"ID{pid}", {})
+                                .get("stats", {})
+                                .get("pitching", {})
+                            )
+                            inn_v = p_stats.get("inningsPitched", "0.0")
+                            hit = p_stats.get("hits", 0)
+                            run = p_stats.get("runs", 0)
+                            er = p_stats.get("earnedRuns")
+                            er_str = f"（{er} 責失）" if er is not None else ""
+                            bb = p_stats.get("baseOnBalls", 0)
+                            kk = p_stats.get("strikeOuts", 0)
+                            pitches = p_stats.get("numberOfPitches", 0)
+                            body = (
+                                f"今日投球成績：{inn_v} 局、{hit} 被安打、{run} 失分{er_str}、"
+                                f"{bb} 保送、{kk} 三振、{pitches} 球"
+                            )
+                            result.append(
+                                TrackingEvent(
+                                    key=f"MLB:{game_id}:PITCHING_EXIT:{pid}",
+                                    league=League.MLB,
+                                    game_id=game_id,
+                                    player_id=pid,
+                                    kind=EventKind.PITCHING_EXIT,
+                                    occurred_at=default_time,
+                                    title="投球工作結束（退場）",
+                                    body=body,
+                                    game_date=game_date,
+                                )
+                            )
 
         if game_data.get("status", {}).get("abstractGameState") == "Final":
             final_time = max((_play_time(play, default_time) for play in plays), default=default_time)
@@ -327,7 +442,7 @@ def _play_time(play: dict[str, Any], fallback: datetime) -> datetime:
     ) else fallback
 
 
-def _half_inning_complete(feed: dict[str, Any], inning: int, half: str, pitcher_id: str) -> bool:
+def _half_inning_complete(feed: dict[str, Any], inning: int, half: str, pitcher_id: str | None = None) -> bool:
     linescore = feed.get("liveData", {}).get("linescore", {})
     current = int(linescore.get("currentInning", 0) or 0)
     current_half = linescore.get("inningHalf", "").lower()
@@ -337,10 +452,8 @@ def _half_inning_complete(feed: dict[str, Any], inning: int, half: str, pitcher_
         return False
     if half == "top" and current_half in {"bottom", "end"}:
         return True
-    if half == current_half:
-        current_pitcher_id = str(linescore.get("defense", {}).get("pitcher", {}).get("id", ""))
-        if current_pitcher_id and current_pitcher_id != pitcher_id:
-            return True
+    if half == "bottom" and current_half in {"end"}:
+        return True
     status = feed.get("gameData", {}).get("status", {}).get("abstractGameState")
     return status == "Final"
 
